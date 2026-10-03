@@ -1,0 +1,12 @@
+import { Router } from 'express';
+import { listLoans, createLoan, recordPayment, dashboard, updateLoan, deleteLoan } from '../controllers/loanController.js';
+import { auth } from '../middleware/auth.js';
+const router = Router();
+router.use(auth);
+router.get('/dashboard', dashboard);
+router.get('/', listLoans);
+router.post('/', createLoan);
+router.post('/:loanId/payments/:paymentId', recordPayment);
+router.put('/:loanId', updateLoan);
+router.delete('/:loanId', deleteLoan);
+export default router;

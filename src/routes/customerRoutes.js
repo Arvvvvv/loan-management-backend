@@ -1,0 +1,10 @@
+import { Router } from 'express';
+import { listCustomers, createCustomer, updateCustomer, deleteCustomer } from '../controllers/customerController.js';
+import { auth } from '../middleware/auth.js';
+const router = Router();
+router.use(auth);
+router.get('/', listCustomers);
+router.post('/', createCustomer);
+router.put('/:id', updateCustomer);
+router.delete('/:id', deleteCustomer);
+export default router;
