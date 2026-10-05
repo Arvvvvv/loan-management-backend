@@ -23,8 +23,9 @@ const allowedOrigins = [
   'capacitor://localhost',
   'ionic://localhost',
 
-  // Production web frontend
-  process.env.CLIENT_URL
+  // Production web frontend(s)
+  process.env.CLIENT_URL,
+  ...(process.env.CLIENT_URLS || '').split(',').map(url => url.trim())
 ].filter(Boolean);
 
 app.use(
@@ -51,7 +52,7 @@ app.use(
    MIDDLEWARE
    ========================================================= */
 
-app.use(express.json());
+app.use(express.json({ limit: '8mb' }));
 
 /* =========================================================
    ROOT / STATUS ROUTE
@@ -98,8 +99,14 @@ app.use((err, req, res, next) => {
     });
   }
 
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({
+      message: 'Profile image is too large. Please choose a smaller image.'
+    });
+  }
+
   res.status(500).json({
-    message: 'Server error'
+    message: err.message || 'Server error'
   });
 });
 

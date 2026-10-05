@@ -103,7 +103,8 @@ export async function updateLoan(req, res) {
       borrowerName,
       principal,
       interestValue,
-      termCount
+      termCount,
+      startDate
     } = req.body;
 
     if (!borrowerName?.trim()) {
@@ -124,6 +125,11 @@ export async function updateLoan(req, res) {
     customer.name = borrowerName.trim();
     await customer.save();
 
+    const nextStartDate = startDate || loan.startDate;
+    if (!nextStartDate || Number.isNaN(new Date(nextStartDate).getTime())) {
+      return res.status(400).json({ message: 'Enter a valid loan start date.' });
+    }
+
     const interestAmount = calculateInterest(principalValue, loan.interestType || 'fixed', interestValueNumber);
     const totalPayable = Number((principalValue + interestAmount).toFixed(2));
     const count = installmentsFor(termValue, loan.termUnit || 'months', loan.frequency || '15days', loan.customDays);
@@ -133,7 +139,8 @@ export async function updateLoan(req, res) {
     if (hasPayments && (
       principalValue !== Number(loan.principal) ||
       interestValueNumber !== Number(loan.interestValue) ||
-      termValue !== Number(loan.termCount)
+      termValue !== Number(loan.termCount) ||
+      new Date(nextStartDate).getTime() !== new Date(loan.startDate).getTime()
     )) {
       return res.status(400).json({
         message: 'This loan already has recorded payments. Only the customer name can be edited after payments have started.'
@@ -145,6 +152,7 @@ export async function updateLoan(req, res) {
     loan.interestAmount = interestAmount;
     loan.totalPayable = totalPayable;
     loan.termCount = termValue;
+    loan.startDate = nextStartDate;
 
     if (!hasPayments) {
       loan.payments = buildPayments(
@@ -169,15 +177,29 @@ export async function deleteLoan(req, res) {
     const loan = await Loan.findById(req.params.loanId);
     if (!loan) return res.status(404).json({ message: 'Loan not found' });
 
-    const hasPayments = loan.payments.some(p => Number(p.paidAmount || 0) > 0);
-    if (hasPayments) {
-      return res.status(400).json({
-        message: 'Cannot delete a loan with recorded payments. Delete is allowed only before payments have been recorded.'
-      });
+    const customerId = loan.customer;
+    const deletedPaymentCount = Array.isArray(loan.payments)
+      ? loan.payments.filter(p => Number(p.paidAmount || 0) > 0).length
+      : 0;
+
+    // Deletion is intentionally allowed even when the loan is unpaid, partially paid,
+    // or already completed. The UI asks for an explicit confirmation before this destructive action.
+    await Loan.findByIdAndDelete(req.params.loanId);
+
+    // Loan creation can automatically create a customer. Remove that customer only
+    // when this was their last remaining loan, so unrelated customers/loans are preserved.
+    if (customerId) {
+      const remainingLoans = await Loan.countDocuments({ customer: customerId });
+      if (remainingLoans === 0) {
+        await Customer.findByIdAndDelete(customerId);
+      }
     }
 
-    await Loan.findByIdAndDelete(req.params.loanId);
-    res.json({ message: 'Loan deleted successfully' });
+    res.json({
+      message: deletedPaymentCount
+        ? 'Loan and its payment records were deleted successfully.'
+        : 'Loan deleted successfully.'
+    });
   } catch (e) {
     res.status(400).json({ message: e.message });
   }
