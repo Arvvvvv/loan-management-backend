@@ -68,7 +68,7 @@ export async function createLoan(req, res) {
 
 export async function recordPayment(req, res) {
   try {
-    const { amount } = req.body;
+    const { amount, paidAt } = req.body;
     const loan = await Loan.findById(req.params.loanId);
     if (!loan) return res.status(404).json({ message: 'Loan not found' });
     const payment = loan.payments.id(req.params.paymentId);
@@ -76,9 +76,11 @@ export async function recordPayment(req, res) {
     const remaining = Number((payment.amount - payment.paidAmount).toFixed(2));
     const received = Number(amount);
     if (!received || received <= 0 || received > remaining) return res.status(400).json({ message: `Enter an amount from ₱0.01 to ₱${remaining.toFixed(2)}` });
+    const paymentDate = paidAt ? new Date(`${paidAt}T00:00:00`) : new Date();
+    if (Number.isNaN(paymentDate.getTime())) return res.status(400).json({ message: 'Enter a valid payment date.' });
     payment.paidAmount = Number((payment.paidAmount + received).toFixed(2));
     payment.status = payment.paidAmount >= payment.amount ? 'Paid' : 'Partial';
-    if (payment.status === 'Paid') payment.paidAt = new Date();
+    payment.paidAt = paymentDate;
     if (loan.payments.every(p => p.status === 'Paid')) loan.status = 'Completed';
     await loan.save();
     res.json(await loan.populate('customer'));
@@ -181,20 +183,13 @@ export async function deleteLoan(req, res) {
     const deletedPaymentCount = Array.isArray(loan.payments)
       ? loan.payments.filter(p => Number(p.paidAmount || 0) > 0).length
       : 0;
-
-    // Deletion is intentionally allowed even when the loan is unpaid, partially paid,
-    // or already completed. The UI asks for an explicit confirmation before this destructive action.
     await Loan.findByIdAndDelete(req.params.loanId);
-
-    // Loan creation can automatically create a customer. Remove that customer only
-    // when this was their last remaining loan, so unrelated customers/loans are preserved.
     if (customerId) {
       const remainingLoans = await Loan.countDocuments({ customer: customerId });
       if (remainingLoans === 0) {
         await Customer.findByIdAndDelete(customerId);
       }
     }
-
     res.json({
       message: deletedPaymentCount
         ? 'Loan and its payment records were deleted successfully.'

@@ -23,7 +23,7 @@ const allowedOrigins = [
   'capacitor://localhost',
   'ionic://localhost',
 
-  // Production web frontend(s)
+  // Production web frontend
   process.env.CLIENT_URL,
   ...(process.env.CLIENT_URLS || '').split(',').map(url => url.trim())
 ].filter(Boolean);
