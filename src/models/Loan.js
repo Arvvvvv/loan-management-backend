@@ -10,6 +10,7 @@ const paymentSchema = new mongoose.Schema({
 }, { _id: true });
 
 const loanSchema = new mongoose.Schema({
+  ownerUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   customer: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
   principal: { type: Number, required: true, min: 0 },
   interestType: { type: String, enum: ['fixed', 'percentage'], default: 'fixed' },

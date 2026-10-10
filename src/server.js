@@ -6,6 +6,7 @@ import { connectDB } from './config/db.js';
 import authRoutes from './routes/authRoutes.js';
 import customerRoutes from './routes/customerRoutes.js';
 import loanRoutes from './routes/loanRoutes.js';
+import { migrateLegacyOwnership } from './utils/migrateOwnership.js';
 
 const app = express();
 
@@ -117,7 +118,8 @@ app.use((err, req, res, next) => {
 const port = process.env.PORT || 5000;
 
 connectDB()
-  .then(() => {
+  .then(async () => {
+    await migrateLegacyOwnership();
     app.listen(port, '0.0.0.0', () => {
       console.log(`Server running on port ${port}`);
     });

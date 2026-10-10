@@ -9,7 +9,6 @@ function addPeriod(date, frequency, customDays) {
   else d.setMonth(d.getMonth() + 1);
   return d;
 }
-
 function installmentsFor(termCount, termUnit, frequency, customDays) {
   if (frequency === '15days') return termUnit === 'months' ? Math.max(1, Math.round(Number(termCount) * 2)) : Math.max(1, Math.ceil(Number(termCount) / 15));
   if (frequency === 'weekly') return termUnit === 'months' ? Math.max(1, Math.round(Number(termCount) * 4.345)) : Math.max(1, Math.ceil(Number(termCount) / 7));
@@ -17,11 +16,10 @@ function installmentsFor(termCount, termUnit, frequency, customDays) {
   const days = Number(termUnit === 'months' ? termCount * 30 : termCount);
   return Math.max(1, Math.ceil(days / Number(customDays || 1)));
 }
-
 function buildPayments(total, count, startDate, frequency, customDays) {
   const base = Math.floor((total / count) * 100) / 100;
   const payments = [];
-  let remainder = Number((total - base * count).toFixed(2));
+  const remainder = Number((total - base * count).toFixed(2));
   let due = new Date(startDate);
   for (let i = 1; i <= count; i++) {
     due = addPeriod(due, frequency, customDays);
@@ -30,13 +28,12 @@ function buildPayments(total, count, startDate, frequency, customDays) {
   }
   return payments;
 }
-
 function calculateInterest(principal, type, value) {
   return type === 'percentage' ? Number((principal * value / 100).toFixed(2)) : Number(value || 0);
 }
 
 export async function listLoans(req, res) {
-  const loans = await Loan.find().populate('customer').sort({ createdAt: -1 });
+  const loans = await Loan.find({ ownerUser: req.user.id }).populate('customer').sort({ createdAt: -1 });
   res.json(loans);
 }
 
@@ -44,24 +41,22 @@ export async function createLoan(req, res) {
   try {
     const { borrowerName, customer, principal, interestType = 'fixed', interestValue, termCount, termUnit = 'months', frequency = '15days', customDays, startDate } = req.body;
     if ((!customer && !borrowerName?.trim()) || !principal || interestValue === undefined || interestValue === null || Number(interestValue) < 0 || !termCount) return res.status(400).json({ message: 'Borrower name, loan amount, interest, and months to pay are required' });
-
     let customerId = customer;
     if (!customerId) {
       const name = borrowerName.trim();
-      let borrower = await Customer.findOne({ name });
-      if (!borrower) borrower = await Customer.create({ name });
+      let borrower = await Customer.findOne({ name, ownerUser: req.user.id });
+      if (!borrower) borrower = await Customer.create({ name, ownerUser: req.user.id });
       customerId = borrower._id;
-    } else if (!(await Customer.exists({ _id: customerId }))) {
+    } else if (!(await Customer.exists({ _id: customerId, ownerUser: req.user.id }))) {
       return res.status(404).json({ message: 'Customer not found' });
     }
-
     const effectiveStartDate = startDate || new Date().toISOString().slice(0, 10);
     if (frequency === 'custom' && !customDays) return res.status(400).json({ message: 'Custom days are required' });
     const interestAmount = calculateInterest(Number(principal), interestType, Number(interestValue));
     const totalPayable = Number((Number(principal) + interestAmount).toFixed(2));
     const count = installmentsFor(Number(termCount), termUnit, frequency, customDays);
     const payments = buildPayments(totalPayable, count, effectiveStartDate, frequency, customDays);
-    const loan = await Loan.create({ customer: customerId, principal, interestType, interestValue, interestAmount, totalPayable, termCount, termUnit, frequency, customDays, startDate: effectiveStartDate, payments });
+    const loan = await Loan.create({ ownerUser: req.user.id, customer: customerId, principal, interestType, interestValue, interestAmount, totalPayable, termCount, termUnit, frequency, customDays, startDate: effectiveStartDate, payments });
     res.status(201).json(await loan.populate('customer'));
   } catch (e) { res.status(400).json({ message: e.message }); }
 }
@@ -69,18 +64,22 @@ export async function createLoan(req, res) {
 export async function recordPayment(req, res) {
   try {
     const { amount, paidAt } = req.body;
-    const loan = await Loan.findById(req.params.loanId);
+    const loan = await Loan.findOne({ _id: req.params.loanId, ownerUser: req.user.id });
     if (!loan) return res.status(404).json({ message: 'Loan not found' });
     const payment = loan.payments.id(req.params.paymentId);
     if (!payment) return res.status(404).json({ message: 'Payment not found' });
     const remaining = Number((payment.amount - payment.paidAmount).toFixed(2));
     const received = Number(amount);
     if (!received || received <= 0 || received > remaining) return res.status(400).json({ message: `Enter an amount from ₱0.01 to ₱${remaining.toFixed(2)}` });
-    const paymentDate = paidAt ? new Date(`${paidAt}T00:00:00`) : new Date();
-    if (Number.isNaN(paymentDate.getTime())) return res.status(400).json({ message: 'Enter a valid payment date.' });
     payment.paidAmount = Number((payment.paidAmount + received).toFixed(2));
     payment.status = payment.paidAmount >= payment.amount ? 'Paid' : 'Partial';
-    payment.paidAt = paymentDate;
+    if (payment.status === 'Paid') {
+      if (paidAt) {
+        const date = new Date(paidAt);
+        if (Number.isNaN(date.getTime())) return res.status(400).json({ message: 'Enter a valid payment date.' });
+        payment.paidAt = date;
+      } else payment.paidAt = new Date();
+    }
     if (loan.payments.every(p => p.status === 'Paid')) loan.status = 'Completed';
     await loan.save();
     res.json(await loan.populate('customer'));
@@ -88,114 +87,63 @@ export async function recordPayment(req, res) {
 }
 
 export async function dashboard(req, res) {
-  const [customers, loans] = await Promise.all([Customer.countDocuments(), Loan.find()]);
+  const [customers, loans] = await Promise.all([
+    Customer.countDocuments({ ownerUser: req.user.id }),
+    Loan.find({ ownerUser: req.user.id })
+  ]);
   const activeLoans = loans.filter(l => l.status === 'Active').length;
   const totalPayable = loans.reduce((s, l) => s + l.totalPayable, 0);
   const collected = loans.reduce((s, l) => s + l.payments.reduce((p, x) => p + x.paidAmount, 0), 0);
   res.json({ customers, loans: loans.length, activeLoans, totalPayable, collected, remaining: Number((totalPayable - collected).toFixed(2)) });
 }
 
-
 export async function updateLoan(req, res) {
   try {
-    const loan = await Loan.findById(req.params.loanId);
+    const loan = await Loan.findOne({ _id: req.params.loanId, ownerUser: req.user.id });
     if (!loan) return res.status(404).json({ message: 'Loan not found' });
-
-    const {
-      borrowerName,
-      principal,
-      interestValue,
-      termCount,
-      startDate
-    } = req.body;
-
-    if (!borrowerName?.trim()) {
-      return res.status(400).json({ message: 'Customer name is required' });
-    }
-
+    const { borrowerName, principal, interestValue, termCount, startDate } = req.body;
+    if (!borrowerName?.trim()) return res.status(400).json({ message: 'Customer name is required' });
     const principalValue = Number(principal);
     const interestValueNumber = Number(interestValue);
     const termValue = Number(termCount);
-
-    if (!principalValue || principalValue <= 0 || Number.isNaN(interestValueNumber) || interestValueNumber < 0 || !termValue || termValue < 1) {
-      return res.status(400).json({ message: 'Enter valid loan amount, interest, and term.' });
-    }
-
-    const customer = await Customer.findById(loan.customer);
+    if (!principalValue || principalValue <= 0 || Number.isNaN(interestValueNumber) || interestValueNumber < 0 || !termValue || termValue < 1) return res.status(400).json({ message: 'Enter valid loan amount, interest, and term.' });
+    const customer = await Customer.findOne({ _id: loan.customer, ownerUser: req.user.id });
     if (!customer) return res.status(404).json({ message: 'Customer not found' });
-
     customer.name = borrowerName.trim();
     await customer.save();
-
     const nextStartDate = startDate || loan.startDate;
-    if (!nextStartDate || Number.isNaN(new Date(nextStartDate).getTime())) {
-      return res.status(400).json({ message: 'Enter a valid loan start date.' });
-    }
-
+    if (!nextStartDate || Number.isNaN(new Date(nextStartDate).getTime())) return res.status(400).json({ message: 'Enter a valid loan start date.' });
     const interestAmount = calculateInterest(principalValue, loan.interestType || 'fixed', interestValueNumber);
     const totalPayable = Number((principalValue + interestAmount).toFixed(2));
     const count = installmentsFor(termValue, loan.termUnit || 'months', loan.frequency || '15days', loan.customDays);
-
     const hasPayments = loan.payments.some(p => Number(p.paidAmount || 0) > 0);
-
-    if (hasPayments && (
-      principalValue !== Number(loan.principal) ||
-      interestValueNumber !== Number(loan.interestValue) ||
-      termValue !== Number(loan.termCount) ||
-      new Date(nextStartDate).getTime() !== new Date(loan.startDate).getTime()
-    )) {
-      return res.status(400).json({
-        message: 'This loan already has recorded payments. Only the customer name can be edited after payments have started.'
-      });
-    }
-
+    if (hasPayments && (principalValue !== Number(loan.principal) || interestValueNumber !== Number(loan.interestValue) || termValue !== Number(loan.termCount) || new Date(nextStartDate).getTime() !== new Date(loan.startDate).getTime())) return res.status(400).json({ message: 'This loan already has recorded payments. Only the customer name can be edited after payments have started.' });
     loan.principal = principalValue;
     loan.interestValue = interestValueNumber;
     loan.interestAmount = interestAmount;
     loan.totalPayable = totalPayable;
     loan.termCount = termValue;
     loan.startDate = nextStartDate;
-
     if (!hasPayments) {
-      loan.payments = buildPayments(
-        totalPayable,
-        count,
-        loan.startDate,
-        loan.frequency || '15days',
-        loan.customDays
-      );
+      loan.payments = buildPayments(totalPayable, count, loan.startDate, loan.frequency || '15days', loan.customDays);
       loan.status = 'Active';
     }
-
     await loan.save();
     res.json(await loan.populate('customer'));
-  } catch (e) {
-    res.status(400).json({ message: e.message });
-  }
+  } catch (e) { res.status(400).json({ message: e.message }); }
 }
 
 export async function deleteLoan(req, res) {
   try {
-    const loan = await Loan.findById(req.params.loanId);
+    const loan = await Loan.findOne({ _id: req.params.loanId, ownerUser: req.user.id });
     if (!loan) return res.status(404).json({ message: 'Loan not found' });
-
     const customerId = loan.customer;
-    const deletedPaymentCount = Array.isArray(loan.payments)
-      ? loan.payments.filter(p => Number(p.paidAmount || 0) > 0).length
-      : 0;
-    await Loan.findByIdAndDelete(req.params.loanId);
+    const deletedPaymentCount = Array.isArray(loan.payments) ? loan.payments.filter(p => Number(p.paidAmount || 0) > 0).length : 0;
+    await Loan.deleteOne({ _id: loan._id, ownerUser: req.user.id });
     if (customerId) {
-      const remainingLoans = await Loan.countDocuments({ customer: customerId });
-      if (remainingLoans === 0) {
-        await Customer.findByIdAndDelete(customerId);
-      }
+      const remainingLoans = await Loan.countDocuments({ customer: customerId, ownerUser: req.user.id });
+      if (remainingLoans === 0) await Customer.deleteOne({ _id: customerId, ownerUser: req.user.id });
     }
-    res.json({
-      message: deletedPaymentCount
-        ? 'Loan and its payment records were deleted successfully.'
-        : 'Loan deleted successfully.'
-    });
-  } catch (e) {
-    res.status(400).json({ message: e.message });
-  }
+    res.json({ message: deletedPaymentCount ? 'Loan and its payment records were deleted successfully.' : 'Loan deleted successfully.' });
+  } catch (e) { res.status(400).json({ message: e.message }); }
 }
